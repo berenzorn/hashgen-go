@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"crypto/sha1"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,7 +13,7 @@ import (
 	"sync"
 )
 
-const BUFFERSIZE = 1e6
+const BUFFER = 1e6
 
 var wg sync.WaitGroup
 
@@ -67,11 +66,15 @@ func (rt *Routine) fileCutter(name string, cmp chan bool, cs chan Block, b chan 
 
 	file, err := os.OpenFile(name, os.O_RDONLY, os.ModePerm)
 	checkFatal(err)
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+		}
+	}(file)
 
 	for {
 		var block Block
-		block.Body = make([]byte, BUFFERSIZE)
+		block.Body = make([]byte, BUFFER)
 		n, err := file.Read(block.Body)
 		if n == 0 || err == io.EOF {
 			break
@@ -125,7 +128,7 @@ func (rt *Routine) stop() {
 
 func showHelp() {
 	fmt.Println(`Usage:
-hashgen [-acq | -h] source
+hashgen [-a] [-c] [-q] [-h] source
 
 required args:
 source
@@ -136,28 +139,19 @@ c       Clear hash orphans
 q       Quiet mode, no output`)
 }
 
-func Checkout(args []string) (Options, Required, error) {
-	var opt Options
-	var req Required
-	switch len(args) {
-	case 0:
+func Checkout(args []string) (opt Options, req Required, err error) {
+	var tail []string
+	if len(args) == 0 {
 		showHelp()
 		os.Exit(0)
-	case 1:
-		if args[0][0] == '-' {
-			if args[0][1] == 'h' {
+	}
+	for _, v := range args {
+		switch v[0] {
+		case '-':
+			switch v[1] {
+			case 'h':
 				showHelp()
 				os.Exit(0)
-			} else {
-				return opt, req, errors.New("wrong command line")
-			}
-		}
-		opt.New = true
-		req.Source = args[0]
-		return opt, req, nil
-	case 2:
-		for _, v := range args[0][1:] {
-			switch v {
 			case 'a':
 				opt.All = true
 			case 'c':
@@ -168,13 +162,23 @@ func Checkout(args []string) (Options, Required, error) {
 				showHelp()
 				os.Exit(0)
 			}
+		default:
+			tail = append(tail, v)
 		}
-		req.Source = args[1]
-		return opt, req, nil
-	default:
-		return opt, req, errors.New("wrong command line")
 	}
-	return Options{}, Required{}, nil
+	if !opt.All {
+		opt.New = true
+	}
+	if len(tail) != 1 {
+		showHelp()
+		os.Exit(0)
+	} else {
+		req.Source = strings.TrimRight(tail[0], "/\\")
+		if _, err = os.ReadDir(req.Source); err != nil {
+			return Options{}, Required{}, err
+		}
+	}
+	return
 }
 
 func Find(slice []string, val string) (int, bool) {
@@ -263,7 +267,11 @@ func main() {
 	var shaFile *os.File
 	path := fmt.Sprintf(req.Source + string(os.PathSeparator) + ".sha1")
 	shaFile, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE, os.ModePerm)
-	defer shaFile.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+		}
+	}(shaFile)
 
 	// разбор файла .sha1
 	// shaMap - словарь [name]: [checksum]
@@ -325,7 +333,10 @@ func main() {
 	defer wg.Wait()
 
 	go logPrint(prints)
-	cpus := runtime.NumCPU()
+	cpus := runtime.NumCPU() - 2
+	if cpus < 1 {
+		cpus = 1
+	}
 	fc = FileCutter{Routine: Routine{Name: "FileCutter", End: make(chan bool, 1)}}
 	for i := 0; i < cpus; i++ {
 		bh := BlockHasher{Routine: Routine{Name: "BlockHasher", End: make(chan bool, 1)}}
